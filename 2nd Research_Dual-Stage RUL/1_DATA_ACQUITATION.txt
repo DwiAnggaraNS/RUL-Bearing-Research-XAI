@@ -1,0 +1,784 @@
+{
+ "cells": [
+  {
+   "cell_type": "markdown",
+   "id": "8c9fe6e7",
+   "metadata": {},
+   "source": [
+    "# Data Acquitation"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "38e9879e",
+   "metadata": {},
+   "source": [
+    "## Konfigurasi Global"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 1,
+   "id": "1e70bc73",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "IS_USING_FFT_DOMAIN = True\n",
+    "\n",
+    "\n",
+    "ROOT_PROJECT_DATASET = \"/home/praktikan/projects/github/DwiAnggara/ProyekRisetBearing\"\n",
+    "BEARING_VARIATION_FOLDER = (\"bearing_1\", )\n",
+    "\n",
+    "MAIN_BEARING = BEARING_VARIATION_FOLDER[0] # Pilih bearing utama untuk analisis\n",
+    "SAMPLING_RATE = 2560"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "f0261ba7",
+   "metadata": {},
+   "source": [
+    "## Import"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 2,
+   "id": "918de71b",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "import os\n",
+    "import glob\n",
+    "import re\n",
+    "\n",
+    "import numpy as np\n",
+    "from numpy.fft import rfft, rfftfreq\n",
+    "\n",
+    "import pandas as pd\n",
+    "\n",
+    "import dask.dataframe as dd\n",
+    "import dask.array as da\n",
+    "from dask.diagnostics.progress import ProgressBar\n",
+    "\n",
+    "import torch\n",
+    "import torch.optim as optim\n",
+    "import torch.nn as nn\n",
+    "\n",
+    "from matplotlib import pyplot as plt\n",
+    "import matplotlib.pyplot as plt\n",
+    "\n",
+    "import plotly.graph_objs as go\n",
+    "import plotly.offline as pyo\n",
+    "\n",
+    "from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score\n",
+    "from sklearn.preprocessing import MinMaxScaler\n",
+    "\n",
+    "import seaborn as sns\n",
+    "\n",
+    "from tqdm import tqdm  # Import tqdm for progress bar\n",
+    "\n",
+    "import gc"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "19f9ccd2",
+   "metadata": {},
+   "source": [
+    "## Helper Functions"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 3,
+   "id": "c85d0f04",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "def temp_output_bearing_root(bearing_name: str) -> str:\n",
+    "    return f\"{ROOT_PROJECT_DATASET}/{bearing_name}\"\n",
+    "\n",
+    "def temp_output_bearing_file_csv(bearing_name: str) -> str:\n",
+    "    return f\"{temp_output_bearing_root(bearing_name)}/{bearing_name}_full.csv\"\n",
+    "\n",
+    "def temp_output_bearing_file_parquet(bearing_name: str) -> str:\n",
+    "    return f\"{temp_output_bearing_root(bearing_name)}/{bearing_name}_full.parquet\"\n",
+    "\n",
+    "def temp_output_bearing_file_fft_parquet(bearing_name: str) -> str:\n",
+    "    return f\"{temp_output_bearing_root(bearing_name)}/{bearing_name}_fft.parquet\""
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "8022f38a",
+   "metadata": {},
+   "source": [
+    "## A. Merged Data as Raw Time Domain Data"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "82da033b",
+   "metadata": {},
+   "source": [
+    "### Helper Function / Variable"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 4,
+   "id": "a79283d7",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "total_bearings = len(BEARING_VARIATION_FOLDER)"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "3d619b0e",
+   "metadata": {},
+   "source": [
+    "### 1. Definisikan mapper untuk mengubah Format RION ke Format yang digunakan"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "c19430d1",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "# Format yang akan digunakan\n",
+    "COLUMN_DTYPES : dict[str, str] = {\n",
+    "    \"time\": 'float32', \n",
+    "    \"X\": 'float32',\n",
+    "    \"Y\": 'float32',\n",
+    "    \"Z\": 'float32',\n",
+    "}\n",
+    "\n",
+    "\n",
+    "# Mapping Format yang dihasilkan RION ke format yang akan digunakan\n",
+    "RION_TO_USED_FORMAT : dict[str, str] = {\n",
+    "    # Format Lama\n",
+    "    's': \"time\",\n",
+    "    'm/s2': \"X\",\n",
+    "    'm/s2.1': \"Y\",\n",
+    "    'm/s2.2': \"Z\",\n",
+    "\n",
+    "    # Format 6 Juni\n",
+    "    'Time (s)': \"time\",\n",
+    "    'AI 1/X (m/s2)': \"X\",\n",
+    "    'AI 2/Y (m/s2)': \"Y\",\n",
+    "    'AI 3/Z (m/s2)': \"Z\"\n",
+    "}"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "37bc4bdd",
+   "metadata": {},
+   "source": [
+    "### 2. Membuat temporary CSV file (Multiple CSV -> Single CSV)\n",
+    "Single CSV ini akan menggunakan format yang telah terdefinisikan COLUMN_DTYPES"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "c29bc496",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "for i, bearing_name in enumerate(BEARING_VARIATION_FOLDER):\n",
+    "    output_file : str = temp_output_bearing_file_csv(bearing_name)\n",
+    "    csv_files = glob.glob(os.path.join(temp_output_bearing_root(bearing_name), \"*\", \"*.csv\"), recursive=True)\n",
+    "    \n",
+    "    exclude_dirs = {\"datasets\"}\n",
+    "\n",
+    "    # Keep files whose parent folder name is NOT excluded\n",
+    "    csv_files = [\n",
+    "        p for p in csv_files\n",
+    "        if os.path.basename(os.path.dirname(p)) not in exclude_dirs\n",
+    "    ]\n",
+    "    \n",
+    "    csv_files.sort(key=lambda x: int(re.search(r'(\\d+)', os.path.basename(x)).group(1)))\n",
+    "\n",
+    "    last_time_value = 0\n",
+    "    header_written = False  # <-- Track header\n",
+    "\n",
+    "    if os.path.exists(output_file):\n",
+    "        print(f\"Output file {output_file} already exists. Removing...\")\n",
+    "        os.remove(output_file)\n",
+    "\n",
+    "    for file_index, csv_file in enumerate(tqdm(csv_files, desc=f\"Processing {i}/{total_bearings}\", unit=\"file\")):\n",
+    "        first_chunk = True\n",
+    "        for chunk in pd.read_csv(csv_file, dtype=COLUMN_DTYPES, chunksize=8192):\n",
+    "            chunk.rename(columns=RION_TO_USED_FORMAT, inplace=True)\n",
+    "\n",
+    "            # Get the first time value in the chunk\n",
+    "            first_time_value = chunk[\"time\"].iloc[0] if not chunk.empty else 0\n",
+    "\n",
+    "            # Substract time with first time value\n",
+    "            chunk[\"time\"] = chunk[\"time\"] - first_time_value \\\n",
+    "                + last_time_value # Adjust time based on the last value\n",
+    "\n",
+    "            # Update last_time_value for the next chunk\n",
+    "            last_time_value = chunk[\"time\"].iloc[-1] if not chunk.empty else last_time_value\n",
+    "\n",
+    "            with open(output_file, 'a') as stream_out:\n",
+    "                chunk.to_csv(stream_out, header=not header_written, index=False)\n",
+    "            header_written = True\n",
+    "            first_chunk = False\n",
+    "\n",
+    "\n",
+    "    print(f\"Saved file: {output_file}\")"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "f2e9e7dd",
+   "metadata": {},
+   "source": [
+    "### 3. Mengubah Single CSV menjadi Parquet"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "e10e04b4",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "# Convert the temporary CSV files to Parquet format\n",
+    "print(\"\\n\\n2. Converting temporary CSV files to Parquet format...\")\n",
+    "\n",
+    "for i, bearing_name in enumerate(BEARING_VARIATION_FOLDER):\n",
+    "    full_csv_file = temp_output_bearing_file_csv(bearing_name)\n",
+    "    parquet_file = temp_output_bearing_file_parquet(bearing_name)\n",
+    "\n",
+    "    print(f\"Reading CSV file: {full_csv_file}...\")\n",
+    "    df = dd.read_csv(full_csv_file, dtype=COLUMN_DTYPES)\n",
+    "    \n",
+    "    print(f\"Converting {full_csv_file} ({i}/{total_bearings}) to Parquet format...\")\n",
+    "    df.to_parquet(parquet_file, engine=\"pyarrow\", write_index=False)\n",
+    "\n",
+    "    print(f\"Saved Parquet file: {parquet_file}\")"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "b04adc11",
+   "metadata": {},
+   "source": [
+    "### 4. Menghapus Single CSV"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "c2dcd1e5",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "# Delete the temporary CSV files\n",
+    "print(\"\\n\\n3. Deleting temporary CSV files...\")\n",
+    "\n",
+    "for i, bearing in enumerate(BEARING_VARIATION_FOLDER):\n",
+    "    full_csv_file = temp_output_bearing_file_csv(bearing)\n",
+    "\n",
+    "    if os.path.exists(full_csv_file):\n",
+    "        os.remove(full_csv_file)\n",
+    "        print(f\"Deleted {full_csv_file}\")\n",
+    "    else:\n",
+    "        print(f\"File {full_csv_file} does not exist, skipping deletion.\")"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "9362749a",
+   "metadata": {},
+   "source": [
+    "## [B. Construct FFT Domain Data]\n",
+    "Hanya berjalan jika variable IS_USING_FFT_DOMAIN bernilai True"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "f8b7bfa0",
+   "metadata": {},
+   "source": [
+    "### Local Configuration"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 5,
+   "id": "922877b7",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "INPUT_RAW_DATA_PARQUET = temp_output_bearing_file_parquet(MAIN_BEARING)\n",
+    "OUTPUT_FFT_DATA_PARQUET = temp_output_bearing_file_fft_parquet(MAIN_BEARING)"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "f216835f",
+   "metadata": {},
+   "source": [
+    "### Helper Function"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 6,
+   "id": "db23d464",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "def compute_fft(partition):\n",
+    "    fft_results = []\n",
+    "    \n",
+    "    # Convert the partition to a NumPy array for efficient slicing\n",
+    "    partition_array = partition.to_numpy()\n",
+    "    \n",
+    "    # Process the data in chunks of 2560 rows\n",
+    "    for i in range(0, len(partition_array), SAMPLING_RATE):\n",
+    "        chunk = partition_array[i:i + SAMPLING_RATE]\n",
+    "        \n",
+    "        # Skip if the chunk is incomplete\n",
+    "        if len(chunk) < SAMPLING_RATE:\n",
+    "            continue\n",
+    "        \n",
+    "        # Extract X, Y, Z columns (assuming they exist in the partition)\n",
+    "        x = np.array(chunk[:, partition.columns.get_loc(\"X\")])\n",
+    "        y = np.array(chunk[:, partition.columns.get_loc(\"Y\")])\n",
+    "        z = np.array(chunk[:, partition.columns.get_loc(\"Z\")])\n",
+    "        \n",
+    "        # Compute FFT and frequency bins\n",
+    "        fft_x = np.abs(rfft(x))\n",
+    "        fft_y = np.abs(rfft(y))\n",
+    "        fft_z = np.abs(rfft(z))\n",
+    "        frequencies = rfftfreq(len(x), d=1 / SAMPLING_RATE)\n",
+    "        \n",
+    "        # Create a dictionary for this chunk with frequency bins as keys\n",
+    "        fft_row = {f\"FFT_{int(freq)}Hz_X\": amp for freq, amp in zip(frequencies, fft_x)}\n",
+    "        fft_row.update({f\"FFT_{int(freq)}Hz_Y\": amp for freq, amp in zip(frequencies, fft_y)})\n",
+    "        fft_row.update({f\"FFT_{int(freq)}Hz_Z\": amp for freq, amp in zip(frequencies, fft_z)})\n",
+    "        \n",
+    "        # Include the time from column time \n",
+    "        if 'time' in partition.columns:\n",
+    "            time_value = chunk[0, partition.columns.get_loc(\"time\")]\n",
+    "            fft_row['time'] = time_value\n",
+    "        else:\n",
+    "            raise ValueError(\"Column 'time' not found in the partition.\")\n",
+    "        \n",
+    "        fft_results.append(fft_row)\n",
+    "    \n",
+    "    # Convert the list of dictionaries to a DataFrame\n",
+    "    return pd.DataFrame(fft_results)"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "b6878a6d",
+   "metadata": {},
+   "source": [
+    "### 1. Tes Ketersediaan Raw Data\n",
+    "Jika tabel terbentuk, maka data berhasil terbaca"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 7,
+   "id": "d63c4c18",
+   "metadata": {},
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "Reading Raw Data Parquet file: /home/praktikan/projects/github/DwiAnggara/ProyekRisetBearing/bearing_1/bearing_1_full.parquet\n"
+     ]
+    }
+   ],
+   "source": [
+    "if not IS_USING_FFT_DOMAIN:\n",
+    "    print(f\"Skipping\")\n",
+    "else:\n",
+    "    print(f\"Reading Raw Data Parquet file: {INPUT_RAW_DATA_PARQUET}\")\n",
+    "    input_parquet_dataframe = dd.read_parquet(INPUT_RAW_DATA_PARQUET)\n",
+    "    input_parquet_dataframe.head()\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "7d8afa93",
+   "metadata": {},
+   "source": [
+    "### 2. Pembuatan Raw data ke FFT"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 8,
+   "id": "34cb6651",
+   "metadata": {},
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "Saving FFT results to Parquet file: /home/praktikan/projects/github/DwiAnggara/ProyekRisetBearing/bearing_1/bearing_1_fft.parquet\n",
+      "[########################################] | 100% Completed | 30m 4ss\n",
+      "FFT results saved to /home/praktikan/projects/github/DwiAnggara/ProyekRisetBearing/bearing_1/bearing_1_fft.parquet\n"
+     ]
+    }
+   ],
+   "source": [
+    "if not IS_USING_FFT_DOMAIN:\n",
+    "    print(f\"Skipping\")\n",
+    "else:\n",
+    "    N_BINS = (SAMPLING_RATE // 2) + 1\n",
+    "\n",
+    "    META = {\n",
+    "        **{f\"FFT_{i}Hz_X\": \"float64\" for i in range(N_BINS)},  # Adjust range based on FFT output\n",
+    "        **{f\"FFT_{i}Hz_Y\": \"float64\" for i in range(N_BINS)},\n",
+    "        **{f\"FFT_{i}Hz_Z\": \"float64\" for i in range(N_BINS)},\n",
+    "        \"time\": \"float64\",\n",
+    "    }\n",
+    "\n",
+    "    FFT_DF = input_parquet_dataframe.map_partitions(compute_fft, meta=META)\n",
+    "    FFT_DF.tail()\n",
+    "\n",
+    "    with ProgressBar():\n",
+    "        print(f\"Saving FFT results to Parquet file: {OUTPUT_FFT_DATA_PARQUET}\")\n",
+    "        FFT_DF.to_parquet(OUTPUT_FFT_DATA_PARQUET, engine=\"pyarrow\", compression=\"snappy\")\n",
+    "\n",
+    "    print(f\"FFT results saved to {OUTPUT_FFT_DATA_PARQUET}\")"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "0ab00590",
+   "metadata": {},
+   "source": [
+    "### 3. Tes Ketersediaan FFT Data\n",
+    "Jika tabel terbentuk, maka data berhasil terbaca"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 10,
+   "id": "a8614ff0",
+   "metadata": {},
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "\n",
+      "\n",
+      "5. Reading the saved Parquet file to verify...\n"
+     ]
+    }
+   ],
+   "source": [
+    "if not IS_USING_FFT_DOMAIN:\n",
+    "    print(f\"Skipping\")\n",
+    "else:\n",
+    "    # Test reading the saved Parquet file\n",
+    "    print(\"\\n\\n5. Reading the saved Parquet file to verify...\")\n",
+    "    TEST_FFT_DF = dd.read_parquet(OUTPUT_FFT_DATA_PARQUET)\n",
+    "    TEST_FFT_DF.tail()"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 11,
+   "id": "8c14d785",
+   "metadata": {},
+   "outputs": [
+    {
+     "data": {
+      "text/html": [
+       "<div>\n",
+       "<style scoped>\n",
+       "    .dataframe tbody tr th:only-of-type {\n",
+       "        vertical-align: middle;\n",
+       "    }\n",
+       "\n",
+       "    .dataframe tbody tr th {\n",
+       "        vertical-align: top;\n",
+       "    }\n",
+       "\n",
+       "    .dataframe thead th {\n",
+       "        text-align: right;\n",
+       "    }\n",
+       "</style>\n",
+       "<table border=\"1\" class=\"dataframe\">\n",
+       "  <thead>\n",
+       "    <tr style=\"text-align: right;\">\n",
+       "      <th></th>\n",
+       "      <th>FFT_0Hz_X</th>\n",
+       "      <th>FFT_1Hz_X</th>\n",
+       "      <th>FFT_2Hz_X</th>\n",
+       "      <th>FFT_3Hz_X</th>\n",
+       "      <th>FFT_4Hz_X</th>\n",
+       "      <th>FFT_5Hz_X</th>\n",
+       "      <th>FFT_6Hz_X</th>\n",
+       "      <th>FFT_7Hz_X</th>\n",
+       "      <th>FFT_8Hz_X</th>\n",
+       "      <th>FFT_9Hz_X</th>\n",
+       "      <th>...</th>\n",
+       "      <th>FFT_1272Hz_Z</th>\n",
+       "      <th>FFT_1273Hz_Z</th>\n",
+       "      <th>FFT_1274Hz_Z</th>\n",
+       "      <th>FFT_1275Hz_Z</th>\n",
+       "      <th>FFT_1276Hz_Z</th>\n",
+       "      <th>FFT_1277Hz_Z</th>\n",
+       "      <th>FFT_1278Hz_Z</th>\n",
+       "      <th>FFT_1279Hz_Z</th>\n",
+       "      <th>FFT_1280Hz_Z</th>\n",
+       "      <th>time</th>\n",
+       "    </tr>\n",
+       "  </thead>\n",
+       "  <tbody>\n",
+       "    <tr>\n",
+       "      <th>347</th>\n",
+       "      <td>27.441986</td>\n",
+       "      <td>33.678436</td>\n",
+       "      <td>31.575867</td>\n",
+       "      <td>31.787077</td>\n",
+       "      <td>21.887751</td>\n",
+       "      <td>26.922678</td>\n",
+       "      <td>27.385254</td>\n",
+       "      <td>25.791399</td>\n",
+       "      <td>26.438040</td>\n",
+       "      <td>26.467161</td>\n",
+       "      <td>...</td>\n",
+       "      <td>13.648609</td>\n",
+       "      <td>70.090340</td>\n",
+       "      <td>123.482613</td>\n",
+       "      <td>57.374653</td>\n",
+       "      <td>126.513794</td>\n",
+       "      <td>58.557755</td>\n",
+       "      <td>81.098076</td>\n",
+       "      <td>67.008995</td>\n",
+       "      <td>55.225491</td>\n",
+       "      <td>392270.59375</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>348</th>\n",
+       "      <td>8.469824</td>\n",
+       "      <td>30.270647</td>\n",
+       "      <td>20.969501</td>\n",
+       "      <td>29.137602</td>\n",
+       "      <td>26.418221</td>\n",
+       "      <td>31.659920</td>\n",
+       "      <td>27.883389</td>\n",
+       "      <td>29.107979</td>\n",
+       "      <td>31.392715</td>\n",
+       "      <td>32.687462</td>\n",
+       "      <td>...</td>\n",
+       "      <td>89.521973</td>\n",
+       "      <td>72.293480</td>\n",
+       "      <td>104.510788</td>\n",
+       "      <td>59.880062</td>\n",
+       "      <td>77.399574</td>\n",
+       "      <td>71.889412</td>\n",
+       "      <td>110.625572</td>\n",
+       "      <td>17.457438</td>\n",
+       "      <td>39.070072</td>\n",
+       "      <td>392271.59375</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>349</th>\n",
+       "      <td>7.927428</td>\n",
+       "      <td>16.574623</td>\n",
+       "      <td>12.172584</td>\n",
+       "      <td>18.766132</td>\n",
+       "      <td>15.616071</td>\n",
+       "      <td>19.428722</td>\n",
+       "      <td>19.578131</td>\n",
+       "      <td>19.965302</td>\n",
+       "      <td>19.932590</td>\n",
+       "      <td>17.849276</td>\n",
+       "      <td>...</td>\n",
+       "      <td>96.508072</td>\n",
+       "      <td>54.555302</td>\n",
+       "      <td>42.257587</td>\n",
+       "      <td>82.399841</td>\n",
+       "      <td>79.417984</td>\n",
+       "      <td>45.116692</td>\n",
+       "      <td>35.809830</td>\n",
+       "      <td>51.840069</td>\n",
+       "      <td>63.993992</td>\n",
+       "      <td>392272.59375</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>350</th>\n",
+       "      <td>8.250273</td>\n",
+       "      <td>35.766880</td>\n",
+       "      <td>13.315701</td>\n",
+       "      <td>7.136408</td>\n",
+       "      <td>12.228225</td>\n",
+       "      <td>11.709204</td>\n",
+       "      <td>12.427172</td>\n",
+       "      <td>11.523568</td>\n",
+       "      <td>12.218243</td>\n",
+       "      <td>12.942050</td>\n",
+       "      <td>...</td>\n",
+       "      <td>56.090271</td>\n",
+       "      <td>81.563034</td>\n",
+       "      <td>61.684444</td>\n",
+       "      <td>100.350670</td>\n",
+       "      <td>50.661983</td>\n",
+       "      <td>83.161209</td>\n",
+       "      <td>21.883865</td>\n",
+       "      <td>97.575615</td>\n",
+       "      <td>135.530777</td>\n",
+       "      <td>392273.59375</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>351</th>\n",
+       "      <td>35.616768</td>\n",
+       "      <td>47.072166</td>\n",
+       "      <td>29.175463</td>\n",
+       "      <td>34.763878</td>\n",
+       "      <td>33.181778</td>\n",
+       "      <td>34.436554</td>\n",
+       "      <td>33.694443</td>\n",
+       "      <td>36.440132</td>\n",
+       "      <td>33.676460</td>\n",
+       "      <td>34.440071</td>\n",
+       "      <td>...</td>\n",
+       "      <td>138.319031</td>\n",
+       "      <td>58.669811</td>\n",
+       "      <td>107.101349</td>\n",
+       "      <td>57.990364</td>\n",
+       "      <td>44.104919</td>\n",
+       "      <td>13.363992</td>\n",
+       "      <td>63.609310</td>\n",
+       "      <td>47.210320</td>\n",
+       "      <td>121.289841</td>\n",
+       "      <td>392274.59375</td>\n",
+       "    </tr>\n",
+       "  </tbody>\n",
+       "</table>\n",
+       "<p>5 rows × 3844 columns</p>\n",
+       "</div>"
+      ],
+      "text/plain": [
+       "     FFT_0Hz_X  FFT_1Hz_X  FFT_2Hz_X  FFT_3Hz_X  FFT_4Hz_X  FFT_5Hz_X  \\\n",
+       "347  27.441986  33.678436  31.575867  31.787077  21.887751  26.922678   \n",
+       "348   8.469824  30.270647  20.969501  29.137602  26.418221  31.659920   \n",
+       "349   7.927428  16.574623  12.172584  18.766132  15.616071  19.428722   \n",
+       "350   8.250273  35.766880  13.315701   7.136408  12.228225  11.709204   \n",
+       "351  35.616768  47.072166  29.175463  34.763878  33.181778  34.436554   \n",
+       "\n",
+       "     FFT_6Hz_X  FFT_7Hz_X  FFT_8Hz_X  FFT_9Hz_X  ...  FFT_1272Hz_Z  \\\n",
+       "347  27.385254  25.791399  26.438040  26.467161  ...     13.648609   \n",
+       "348  27.883389  29.107979  31.392715  32.687462  ...     89.521973   \n",
+       "349  19.578131  19.965302  19.932590  17.849276  ...     96.508072   \n",
+       "350  12.427172  11.523568  12.218243  12.942050  ...     56.090271   \n",
+       "351  33.694443  36.440132  33.676460  34.440071  ...    138.319031   \n",
+       "\n",
+       "     FFT_1273Hz_Z  FFT_1274Hz_Z  FFT_1275Hz_Z  FFT_1276Hz_Z  FFT_1277Hz_Z  \\\n",
+       "347     70.090340    123.482613     57.374653    126.513794     58.557755   \n",
+       "348     72.293480    104.510788     59.880062     77.399574     71.889412   \n",
+       "349     54.555302     42.257587     82.399841     79.417984     45.116692   \n",
+       "350     81.563034     61.684444    100.350670     50.661983     83.161209   \n",
+       "351     58.669811    107.101349     57.990364     44.104919     13.363992   \n",
+       "\n",
+       "     FFT_1278Hz_Z  FFT_1279Hz_Z  FFT_1280Hz_Z          time  \n",
+       "347     81.098076     67.008995     55.225491  392270.59375  \n",
+       "348    110.625572     17.457438     39.070072  392271.59375  \n",
+       "349     35.809830     51.840069     63.993992  392272.59375  \n",
+       "350     21.883865     97.575615    135.530777  392273.59375  \n",
+       "351     63.609310     47.210320    121.289841  392274.59375  \n",
+       "\n",
+       "[5 rows x 3844 columns]"
+      ]
+     },
+     "execution_count": 11,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "TEST_FFT_DF = dd.read_parquet(OUTPUT_FFT_DATA_PARQUET)\n",
+    "TEST_FFT_DF.tail()"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "59c1a327",
+   "metadata": {},
+   "source": [
+    "### Gabage Collector"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 12,
+   "id": "6a0ae9d2",
+   "metadata": {},
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "\n",
+      "\n",
+      "6. Cleaning up...\n"
+     ]
+    }
+   ],
+   "source": [
+    "if not IS_USING_FFT_DOMAIN:\n",
+    "    print(f\"Skipping\")\n",
+    "else:\n",
+    "    print(\"\\n\\n6. Cleaning up...\")\n",
+    "    try:\n",
+    "        del input_parquet_dataframe\n",
+    "        del FFT_DF\n",
+    "    except Exception as e:\n",
+    "        print(f\"Error during cleanup: {e}\")\n",
+    "    finally:\n",
+    "        gc.collect()"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "6811ee36",
+   "metadata": {},
+   "source": [
+    "## Selanjutnya \"2_Data_Preprocessing\""
+   ]
+  }
+ ],
+ "metadata": {
+  "kernelspec": {
+   "display_name": "Python (riset-bearing-rul-env)",
+   "language": "python",
+   "name": "riset-bearing-rul-env"
+  },
+  "language_info": {
+   "codemirror_mode": {
+    "name": "ipython",
+    "version": 3
+   },
+   "file_extension": ".py",
+   "mimetype": "text/x-python",
+   "name": "python",
+   "nbconvert_exporter": "python",
+   "pygments_lexer": "ipython3",
+   "version": "3.12.12"
+  }
+ },
+ "nbformat": 4,
+ "nbformat_minor": 5
+}
