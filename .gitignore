@@ -32,6 +32,7 @@ env/
 .venv
 
 *.pdf
+*.txt
 
 /docs_for_improvement
 
